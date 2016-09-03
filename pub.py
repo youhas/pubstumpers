@@ -7,12 +7,13 @@ import operator
 import datetime
 
 HTMLFILE = "index.html"
-VERBOSE = True            # yap about things as they're being worked through
+VERBOSE = False            # yap about things as they're being worked through
 RESET_DATABASE = False    # recreate database from scratch (instead of querying what we've got)
 PURGE_LAST_SEASON = True  # no need to recreate the whole database from scratch.  just burn and re-parse the last season's page
-LAST_SEASON = 39          # clunky, but easier than trying to load pages until I get a 404
+LAST_SEASON = 43          # clunky, but easier than trying to load pages until I get a 404
 DATABASE = "trivia.db"
-SELECTED_TEAM = "xeditors"  # edit to highlight your own team, if you'd like!
+SELECTED_TEAM = "xeditors"                          # edit to highlight your own team, if you'd like!
+SELECTED_TEAM = SELECTED_TEAM.replace("'", "''")    # to make the SQL queries happy
 DATA_SOURCE = "http://pubs.pubstumpers.com/index.cfm?DocID=Pub%20Profile&cn=68"   # edit to reflect your own location as needed
 color_regex = re.compile("color:#(......)")
 
@@ -62,6 +63,21 @@ NORMALIZED = {
 	'e=m c hammer': "e=mc hammer"
 }
 
+# data that overrides the actual scraped data
+# season -> team_name -> week -> (rank, score)
+# use the normalized team name per the table above
+OVERRIDES = {
+	"38": {
+		"never question howard": { 12: (0, 67) },
+	},
+    "42": {
+        "e=mc hammer": { 9: (4, 65) },
+        "never question howard": { 9: (3, 69) },
+        "the photons": { 9: (2, 74) },
+        "xeditors": { 9: (1, 76) },
+    }
+}
+
 # god hates unicode
 def removeNonAscii(s):
     return "".join(i for i in s if ord(i)<128)
@@ -82,6 +98,24 @@ def get_rank(html):
     else:
         return 0
 
+def override_values(season, team_name, week, rank, score):
+    non_override = (season, team_name, week, rank, score)
+    if (not season in OVERRIDES):
+        return(non_override)
+
+    team_name_dict = OVERRIDES[season]
+    if (not team_name in team_name_dict):
+        return(non_override)
+
+    week_dict = team_name_dict[team_name]
+    if (not week in week_dict):
+        return(non_override)
+        
+    (new_rank, new_score) = week_dict[week]
+    if (VERBOSE): print("overriding parsed data with:", (season, team_name, week, new_rank, new_score))
+    return(season, team_name, week, new_rank, new_score)
+		
+		
 # get the HTML page for Season #<season> of PubStumpers trivia
 # if we already have a local file, don't attempt to redownload things.
 # otherwise: nab the missing file via HTTP
@@ -145,6 +179,7 @@ def parse_season(season):
                     score = int(score)
                     if (score == 0):                                # zero scores map to non-attendance (rank -1, to differentiate)
                         rank = -1
+                    (season, team_name, week, rank, score) = override_values(season, team_name, week, rank, score)
                     if (VERBOSE): print("WEEK: " + str(week) + "  SCORE: " + str(score) + "  RANK: " + str(rank))
                     c.execute("INSERT INTO weekly_results VALUES (?,?,?,?,?)", (season, team_name, week, rank, score))
                     conn.commit()
@@ -213,7 +248,7 @@ def get_seasons():
     c = conn.cursor()
     
     seasons = []
-    season_rows = c.execute("SELECT DISTINCT season FROM season_results")
+    season_rows = c.execute("SELECT DISTINCT season FROM season_results ORDER BY season ASC")
     for row in season_rows:
         seasons.append(row[0])
     return(seasons)
@@ -244,8 +279,8 @@ def clean_database():
         max_score_rows = c.execute("SELECT MAX(score) FROM weekly_results WHERE season={:d} AND week={:d}".format(season, week))
         max_score_tuple = max_score_rows.fetchone()
         max_score = max_score_tuple[0]
-        if (VERBOSE): print(season, week, max_score)
-        if (not max_score):         # top score for the week was 0?  yeah, that week wasn't real.
+        #if (VERBOSE): print(season, week, max_score)
+        if (max_score <= 0):         # top score for the week was 0?  yeah, that week wasn't real.
             if (VERBOSE): print("S{:d} W{:d} was not 'real' - tagging for deletion.".format(season, week))
             weeks_to_unexist.append(season_week)
             seasons_to_unexist[season] = True   # any season with an "unreal" week probably isn't legit in its own right.  purge it.
@@ -361,8 +396,8 @@ def get_seasons_won_by_team():
     # for every season: get the top score for that season
     for season in seasons:
         top_score_rows = c.execute("SELECT MAX(score) FROM season_results WHERE season={:d}".format(season))
-        top_score = top_score_rows.fetchone()
-        top_score = top_score[0]
+        top_score_tuple = top_score_rows.fetchone()
+        top_score = top_score_tuple[0]
         
         # get the list of teams that had the top score for a given season (could be more than one!)
         winning_teams = c.execute("SELECT team FROM season_results WHERE season={:d} AND score={:f}".format(season, top_score))
@@ -383,8 +418,45 @@ def get_seasons_won_by_team():
     team_wins.reverse()
     return(team_wins)
  
- #def get_highest_average_scores():
- #   c.execute("SELECT UNIQUE team, AVG(score) as avrij FROM weekly_results ORDER BY avrij DESC")
+
+def get_averages():
+    retval = []
+    seasons = get_seasons()     # this gets the seasons in ascending order
+    seasons.reverse()           # but we want them in descending
+    c = conn.cursor()
+    
+    for season in seasons:
+        # get the best score for each week in the season.  average all of those values together.
+        weeks_results = c.execute("SELECT DISTINCT week FROM weekly_results WHERE season={:d}".format(season))
+        weeks_tuples = weeks_results.fetchall()
+        max_total = 0.0
+        num_weeks = 0
+        for week_tuple in weeks_tuples:
+            week = week_tuple[0]
+            max_score_for_week_results = c.execute("SELECT MAX(score) FROM weekly_results WHERE season={:d} AND week={:d}".format(season, week))
+            max_score_for_week_tuple = max_score_for_week_results.fetchone()
+            max_score_for_week = max_score_for_week_tuple[0]
+            
+            if (max_score_for_week > 0):
+                max_total += max_score_for_week
+                num_weeks += 1
+                if (VERBOSE): print(season, week, max_score_for_week)
+        average_max = max_total / num_weeks     # average of all the best weekly scores
+
+        # now, get the team that won the season, and figure out their average weekly score
+        # ignore the "multiple teams tied for the season win!" for now
+        winning_team_results = c.execute("SELECT team FROM season_results WHERE season={:d} ORDER BY score DESC LIMIT 1".format(season))
+        winning_team_tuple = winning_team_results.fetchone()
+        winning_team = winning_team_tuple[0]
+        
+        winning_team = winning_team.replace("'", "''")      # to make MYSQL happy with teams with single-quotes
+        average_winner_score_results = c.execute("SELECT AVG(score) FROM weekly_results WHERE season={:d} AND team='{:s}'".format(season, winning_team))
+        average_winner_score_tuple = average_winner_score_results.fetchone()
+        average_winner_score = average_winner_score_tuple[0]
+    
+        retval.append((season, "{:.2f}".format(average_max), "{:.2f}".format(average_winner_score)))
+
+    return(retval)
  
 # assuming there's a database full of interesting information: look at it.
 # do some clever queries and print a mess of tables based on what all we can find
@@ -400,10 +472,6 @@ def analyze_database():
     writefile.write('<i>Page created at {:s}.</i> '.format(now_string))
     writefile.write('<i>Data analyzed procured from <a href="{:s}">this source</a>.</i><p />'.format(DATA_SOURCE))
     writefile.write('</FONT>')
-    
-    # query for data and use it to print out every remotely interesting table
-    #highest_average_scores = c.execute("SELECT team, AVG(score) as avrij FROM weekly_results WHERE score!=0 GROUP BY team ORDER BY avrij DESC")
-    #print_table("Highest Average Scores", ["Team", "Average"], highest_average_scores)
 
     highest_scores_ever = c.execute("SELECT team, season, week, score, rank FROM weekly_results WHERE team='{:s}' ORDER BY score DESC, season DESC, week DESC LIMIT 20".format(SELECTED_TEAM))
     print_table("Highest {:s} Weeks Ever".format(SELECTED_TEAM), ["Team", "Season", "Week", "Score", "Rank"], highest_scores_ever)
@@ -442,6 +510,9 @@ def analyze_database():
 
     total_showings_ever = c.execute("SELECT team, COUNT(*) AS shows FROM weekly_results WHERE rank!='-1' GROUP BY team ORDER BY shows DESC LIMIT 20")
     print_table("Total Showings Ever", ["Team", "Times Present"], total_showings_ever)
+
+    averages = get_averages()
+    print_table("Weekly Trends", ["Season", "Average Top Score", "Top Team's Average Score"], averages)
 
     # write out HTML footer
     writefile.write('</BODY>\n</HTML>\n')
