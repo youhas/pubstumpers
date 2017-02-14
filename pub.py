@@ -7,10 +7,10 @@ import operator
 import datetime
 
 HTMLFILE = "index.html"
-VERBOSE = False            # yap about things as they're being worked through
+VERBOSE = False           # yap about things as they're being worked through
 RESET_DATABASE = False    # recreate database from scratch (instead of querying what we've got)
 PURGE_LAST_SEASON = True  # no need to recreate the whole database from scratch.  just burn and re-parse the last season's page
-LAST_SEASON = 43          # clunky, but easier than trying to load pages until I get a 404
+LAST_SEASON = 44          # clunky, but easier than trying to load pages until I get a 404
 DATABASE = "trivia.db"
 SELECTED_TEAM = "xeditors"                          # edit to highlight your own team, if you'd like!
 SELECTED_TEAM = SELECTED_TEAM.replace("'", "''")    # to make the SQL queries happy
@@ -60,7 +60,8 @@ NORMALIZED = {
     'has any one seen my camel': "has anyone seen my camel",
     'choaos theory': "chaos theory",
     'photons': "the photons",
-	'e=m c hammer': "e=mc hammer"
+    'e=m c hammer': "e=mc hammer",
+    'honeymooners': "the honeymooners",
 }
 
 # data that overrides the actual scraped data
@@ -146,7 +147,7 @@ def parse_season(season):
     f.close()
 
     # let BeautifulSoup deal with parsing the train wreck of the trivia HTML
-    soup = BeautifulSoup(text)
+    soup = BeautifulSoup(text, "html.parser")
     
     c = conn.cursor()
     all_results = soup.find_all("td", align="left", colspan=None)   # get all the TD containing team names
@@ -269,7 +270,10 @@ def get_season_weeks():
 # or "weeks" that are from the current ongoing season that are still in the future, so they haven't happened yet.
 # we should get rid of those.
 def clean_database():
+    global last_week_tuple
+
     season_weeks = get_season_weeks()
+    last_week_tuple = (season_weeks[-1:])[0]    # save the last season/week for display on the HTML page
     c = conn.cursor()
     
     weeks_to_unexist = []
@@ -462,6 +466,8 @@ def get_averages():
 # do some clever queries and print a mess of tables based on what all we can find
 def analyze_database():
     global writefile
+    global last_week_tuple
+
     c = conn.cursor()
     
     # write out HTML header
@@ -469,7 +475,8 @@ def analyze_database():
     now = datetime.datetime.now()
     now_string = datetime.date.strftime(now, "%a %Y-%b-%d %H:%M")
     writefile.write('<FONT COLOR="ffffff">')
-    writefile.write('<i>Page created at {:s}.</i> '.format(now_string))
+    writefile.write('<i>Page created at {:s}.</i><br />'.format(now_string))
+    writefile.write('<i>Last week processed: Season {:d}, Week {:d}.</i><br />'.format(last_week_tuple[0], last_week_tuple[1]))
     writefile.write('<i>Data analyzed procured from <a href="{:s}">this source</a>.</i><p />'.format(DATA_SOURCE))
     writefile.write('</FONT>')
 
